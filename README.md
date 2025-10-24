@@ -41,12 +41,12 @@ install.packages(c(
 click "Run App" in RStudio
 
                                          -----------------------------------------------------------------
-Data
+Data:
 This repo does not include the dataset. See data/README.md for instructions to download the commonly used Kaggle Stroke Prediction Dataset (healthcare-dataset-stroke-data.csv) and where to place it.
 The app ignores an id column if present.
 Please review the data’s license/terms before use.
 
-Expected columns 
+Expected columns:
 gender, age, hypertension (0/1), heart_disease (0/1), ever_married, work_type,
 residence_type (raw may be Residence_type), avg_glucose_level, bmi, smoking_status, stroke (target).
 
@@ -65,7 +65,7 @@ stroke	target, binary (0/1 or no/yes)	required
 
 The app normalizes column names and coerces bmi to numeric; the target accepts 0/1 or no/yes.
 
-How to use
+How to use:
 Data: Upload CSV, confirm target (stroke). Check class balance and split sizes.
 Model: Choose Random Forest (set trees, class weight) or Lasso Logistic; optionally enable SMOTE.
 Train: Click Train.
@@ -75,14 +75,14 @@ Importance (RF): View top features.
 Individual: Enter a single person’s values → Predict to see probability & class, plus a local explanation.
 Predictions: Download test-set predictions as CSV.
 
-Repository notes
+Repository notes:
 .gitignore excludes large data and local outputs. See data/README.md for data instructions.
 Consider renv::init() to lock dependencies for reproducibility.
 
-License
+License:
 MIT License for the code (see LICENSE). 
 Data is licensed by its owner; see data/README.md for source and terms. No affiliation with MIT.
 
-Acknowledgements
+Acknowledgements:
 Built with tidymodels, themis, vip, shiny, DT, plotly, janitor.
 Example schema based on the public “Stroke Prediction Dataset”.
