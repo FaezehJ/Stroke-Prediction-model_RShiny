@@ -1,0 +1,304 @@
+---
+title: "Stroke-prediction-model"
+author: "Faezeh Jahanshiri"
+date: "2025-10-07"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    css: report.css
+params:
+  data_path: "C:/Users/faeze/Desktop/R-projects/healthcare-dataset-stroke-data.csv"
+  id_col: "id"
+  target: "stroke"
+  model: "rf"          # "rf" or "logit"
+  use_smote: true
+  rf_trees: 800
+  rf_class_weight: 10  # weight for positive class ("yes")
+  train_prop: 0.8
+  cv_folds: 5
+  threshold: 0.25
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+set.seed(42)
+
+
+if (!file.exists("report.css")) {
+  writeLines(c(
+    "/* --- Light styling for the HTML report --- */",
+    "pre code { white-space: pre-wrap; font-size: 0.9rem; }",
+    "table { width: 100%; border-collapse: collapse; }",
+    "th, td { padding: 8px 10px; border-bottom: 1px solid #eee; }",
+    "thead th { background: #f7f7f7; }",
+    "h1, h2, h3 { margin-top: 1.4em; }",
+    "code { background: #f5f5f5; padding: 2px 4px; border-radius: 4px; }"
+  ), "report.css")
+}
+
+needed <- c("tidymodels","themis","janitor","vip","ranger","glmnet",
+            "dplyr","ggplot2","readr","stringr")
+missing <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing)) {
+  stop("Missing packages: ", paste(missing, collapse = ", "),
+       "\nInstall once in Console, e.g.\n  install.packages(c(\"",
+       paste(missing, collapse = "\", \""), "\"), lib = \"C:/Rlibs\", type = \"binary\")")
+}
+
+library(tidymodels)
+library(themis)
+library(janitor)
+library(vip)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(stringr)
+
+metric_fun <- yardstick::metric_set(roc_auc, pr_auc, accuracy,
+                                    yardstick::sens, yardstick::spec)
+
+# parallel tuning
+if (requireNamespace("future", quietly = TRUE)) {
+  future::plan(future::multisession, workers = max(1, parallel::detectCores() - 1))
+}
+ctrl <- control_grid(parallel_over = "resamples", verbose = TRUE, save_pred = FALSE)
+
+
+
+```{r load-data}
+data <- read.csv(params$data_path, stringsAsFactors = FALSE)
+
+names(data) <- names(data) |>
+  tolower() |>
+  gsub("[^a-z0-9]+", "_", x = _) |>
+  sub("^_", "", x = _) |>
+  sub("_$", "", x = _)
+
+nrow(data); ncol(data)
+head(data, 6)
+str(data)
+summary(data)
+
+
+if ("bmi" %in% names(data)) data$bmi <- suppressWarnings(as.numeric(data$bmi))
+
+fac_cols <- c("gender","ever_married","work_type","residence_type","smoking_status")
+for (nm in intersect(fac_cols, names(data))) data[[nm]] <- factor(data[[nm]])
+
+stopifnot(params$target %in% names(data))
+s <- data[[params$target]]
+if (is.factor(s)) s <- as.character(s)
+if (is.character(s)) {
+  s_num <- suppressWarnings(as.numeric(s))
+  if (!all(s %in% c("0","1")) && any(is.na(s_num))) {
+    s_num <- ifelse(tolower(s) %in% "yes", 1,
+                    ifelse(tolower(s) %in% "no", 0, NA_real_))
+  }
+} else if (is.numeric(s)) {
+  s_num <- s
+} else stop("Unexpected type for target column.")
+
+keep <- which(s_num %in% c(0,1))
+stopifnot(length(keep) > 0)
+data <- data[keep, , drop = FALSE]
+data[[params$target]] <- factor(s_num[keep], levels = c(0,1), labels = c("no","yes"))
+
+cat("Overall class counts:\n"); print(table(data[[params$target]]))
+
+
+
+```{r split}
+split_obj <- initial_split(data, prop = params$train_prop, strata = all_of(params$target))
+train <- training(split_obj); test <- testing(split_obj)
+
+cat("Train:", nrow(train), " Test:", nrow(test), "\n")
+cat("Train classes:\n"); print(table(train[[params$target]]))
+cat("Test  classes:\n"); print(table(test [[params$target]]))
+
+
+
+```{r recipe}
+rec <- recipe(reformulate(termlabels = setdiff(names(train), params$target),
+                          response = params$target),
+              data = train)
+
+if (nzchar(params$id_col) && params$id_col %in% names(train)) {
+  rec <- rec %>% update_role(all_of(params$id_col), new_role = "id")
+}
+
+rec <- rec %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_other(all_nominal_predictors(), threshold = 0.01, other = "other") %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+if (isTRUE(params$use_smote)) rec <- rec %>% step_smote(all_outcomes())
+
+pp <- prep(rec); p <- ncol(juice(pp)) - 1
+cat("Predictors after preprocessing:", p, "\n")
+
+
+
+```{r models, cache=TRUE}
+# ---- safer, faster tuning settings ----
+folds <- vfold_cv(train, v = 3, strata = all_of(params$target))
+
+log_spec <- logistic_reg(penalty = tune(), mixture = 1) %>%
+  set_engine("glmnet") %>% set_mode("classification")
+
+rf_spec_tune <- rand_forest(mtry = tune(), min_n = tune(), trees = params$rf_trees) %>%
+  set_engine("ranger", importance = "impurity",
+             class.weights = c("no" = 1, "yes" = as.numeric(params$rf_class_weight))) %>%
+  set_mode("classification")
+
+log_wf <- workflow() %>% add_model(log_spec) %>% add_recipe(rec)
+rf_wf  <- workflow() %>% add_model(rf_spec_tune) %>% add_recipe(rec)
+
+# compute p (predictor count) robustly
+pp_try <- try(prep(rec), silent = TRUE)
+p <- if (!inherits(pp_try, "try-error")) ncol(juice(pp_try)) - 1 else max(2L, ncol(train)-1)
+
+# compact grids that avoid edge cases
+log_grid <- grid_regular(penalty(range = c(-3, -0.5)), levels = 8)
+
+rf_params <- dials::parameters(
+  dials::mtry(range = c(max(2L, floor(0.1 * p)), max(2L, min(p, floor(0.6 * p))))),
+  dials::min_n(range = c(2L, 15L))
+)
+rf_grid <- dials::grid_space_filling(rf_params, size = 8)
+
+# reuse ctrl from setup if it exists, else make a local one
+if (!exists("ctrl")) ctrl <- control_grid(parallel_over = "resamples", verbose = TRUE, save_pred = FALSE)
+
+# ---- try tuning; if it fails, fall back automatically ----
+tune_ok <- TRUE
+res <- NULL
+final_wf <- NULL
+
+if (identical(params$model, "logit")) {
+  res <- try(tune_grid(log_wf, resamples = folds, grid = log_grid,
+                       metrics = metric_fun, control = ctrl), silent = TRUE)
+} else {
+  res <- try(tune_grid(rf_wf,  resamples = folds, grid = rf_grid,
+                       metrics = metric_fun, control = ctrl), silent = TRUE)
+}
+
+# helper to check if tuning produced any metrics
+has_metrics <- function(x) {
+  inherits(x, "tune_results") &&
+    tryCatch(nrow(collect_metrics(x)) > 0, error = function(e) FALSE)
+}
+
+if (!has_metrics(res)) {
+  tune_ok <- FALSE
+  message("Tuning failed or produced no metrics; falling back to a default Random Forest.")
+
+  # default (no-tune) RF spec
+  mtry_default <- max(2L, floor(sqrt(p)))
+  rf_spec_default <- rand_forest(mtry = mtry_default, min_n = 5, trees = max(200L, as.integer(params$rf_trees))) %>%
+    set_engine("ranger", importance = "impurity",
+               class.weights = c("no" = 1, "yes" = as.numeric(params$rf_class_weight))) %>%
+    set_mode("classification")
+
+  final_wf <- workflow() %>% add_model(rf_spec_default) %>% add_recipe(rec)
+} else {
+  best <- try(select_best(res, metric = "roc_auc"), silent = TRUE)
+  if (inherits(best, "try-error") || is.null(best) || nrow(best) == 0) {
+    tune_ok <- FALSE
+    message("No best parameters could be selected; using default Random Forest.")
+
+    mtry_default <- max(2L, floor(sqrt(p)))
+    rf_spec_default <- rand_forest(mtry = mtry_default, min_n = 5, trees = max(200L, as.integer(params$rf_trees))) %>%
+      set_engine("ranger", importance = "impurity",
+                 class.weights = c("no" = 1, "yes" = as.numeric(params$rf_class_weight))) %>%
+      set_mode("classification")
+
+    final_wf <- workflow() %>% add_model(rf_spec_default) %>% add_recipe(rec)
+  } else {
+    final_wf <- if (identical(params$model, "logit")) {
+      finalize_workflow(log_wf, best)
+    } else {
+      finalize_workflow(rf_wf, best)
+    }
+  }
+}
+
+# Show top metrics if tuning worked (so you see something in the report)
+if (tune_ok) {
+  print(
+    collect_metrics(res) %>%
+      arrange(.metric, desc(mean)) %>%
+      dplyr::slice_head(n = 10)
+  )
+} else {
+  cat("Using default Random Forest (no tuning).\n")
+}
+
+
+```{r check-objs}
+# What exists so far?
+print(ls(pattern = "final_wf|final_fit|probs"))
+
+if (!exists("final_wf")) stop("`final_wf` was not created in the [models] chunk.")
+
+# If fit-eval didn’t run to completion, final_fit/probs might be missing.
+if (!exists("final_fit")) {
+  message("`final_fit` missing; fitting now...")
+  final_fit <- fit(final_wf, train)
+}
+
+if (!exists("probs")) {
+  message("`probs` missing; predicting now from final_fit...")
+  probs <- predict(final_fit, test, type = "prob") %>%
+    dplyr::bind_cols(test %>% dplyr::select(all_of(params$target)))
+}
+
+# Sanity check: we expect a .pred_yes column
+stopifnot(".pred_yes" %in% names(probs))
+
+
+
+```{r curves, fig.width=6, fig.height=4}
+roc_df <- yardstick::roc_curve(probs, truth = !!sym(params$target), .pred_yes)
+pr_df  <- yardstick::pr_curve(probs,  truth = !!sym(params$target), .pred_yes)
+
+p1 <- ggplot(roc_df, aes(1 - specificity, sensitivity)) +
+  geom_line() + geom_abline(lty = 2) +
+  labs(x = "1 - Specificity", y = "Sensitivity")
+
+p2 <- ggplot(pr_df, aes(recall, precision)) +
+  geom_line() +
+  labs(x = "Recall", y = "Precision")
+
+p1; p2
+
+
+
+```{r vip, fig.width=6, fig.height=5, eval = identical(params$model, "rf")}
+rf_fit <- try(extract_fit_parsnip(final_fit)$fit, silent = TRUE)
+if (!inherits(rf_fit, "try-error")) {
+  vip::vip(rf_fit, num_features = 12)
+}
+
+
+```{r save-preds, eval=FALSE}
+pred_out <- test %>%
+  mutate(.pred_yes = probs$.pred_yes,
+         .pred_no  = probs$.pred_no,
+         .pred_class = factor(ifelse(.pred_yes >= params$threshold, "yes", "no"),
+                              levels = c("no","yes")))
+readr::write_csv(pred_out, paste0("predictions_", format(Sys.Date()), ".csv"))
+
+
+
+sessionInfo()
+
+
+
+
+
+
