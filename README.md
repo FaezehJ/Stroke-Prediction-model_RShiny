@@ -40,11 +40,33 @@ install.packages(c(
 
 click "Run App" in RStudio
 
-                                         -----------------------------------------------------------------
+-----------------------------------------------------------------
 Data:
 This repo does not include the dataset. See data/README.md for instructions to download the commonly used Kaggle Stroke Prediction Dataset (healthcare-dataset-stroke-data.csv) and where to place it.
 The app ignores an id column if present.
 Please review the data’s license/terms before use.
+
+
+This project uses the **Stroke Prediction Dataset** (file: `healthcare-dataset-stroke-data.csv`) commonly distributed on Kaggle.
+
+- Source: Kaggle — “Stroke Prediction Dataset” by fedesoriano  
+  (Search for: kaggle fedesoriano stroke prediction dataset)
+- Contents: 5,110 rows × 12 columns (id, gender, age, hypertension, heart_disease,
+  ever_married, work_type, Residence_type/residence_type, avg_glucose_level, bmi,
+  smoking_status, stroke).
+
+## How to obtain
+1) Visit the Kaggle dataset page and download `healthcare-dataset-stroke-data.csv`.
+2) Place it in this folder as:  
+   `data/healthcare-dataset-stroke-data.csv`
+
+## License
+The dataset is licensed by the *data owner* (see Kaggle page for the definitive license and terms).  
+**Do not redistribute the CSV in this repository.** Cite the source when using the data.
+
+### Suggested citation
+> fedesoriano. *Stroke Prediction Dataset.* Kaggle. (Accessed YYYY-MM-DD).
+
 
 Expected columns:
 gender, age, hypertension (0/1), heart_disease (0/1), ever_married, work_type,
